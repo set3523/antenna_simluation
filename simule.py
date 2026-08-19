@@ -559,7 +559,7 @@ def run_ga():
 
     print("\n🎉 모든 진화 과정이 완료되었습니다!")
 
-
+#tst
 if __name__ == '__main__':
     # Windows에서 multiprocessing을 사용할 때 필수 방어 코드
     mp.freeze_support()
