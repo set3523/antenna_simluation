@@ -501,7 +501,7 @@ def create_individual():
 """
 
 def run_ga():
-    POP_SIZE = 30
+    POP_SIZE = 5
     GENERATIONS = 30
     MUTATION_RATE = 0.05
 
