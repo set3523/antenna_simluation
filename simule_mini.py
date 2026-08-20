@@ -108,67 +108,14 @@ def simulate_and_dump_paraview(genome, output_dir="paraview_debug_output"):
     with open(log_path, "w", encoding="utf-8") as log_file:
         try:
             log_file.write("=== ParaView 디버깅 시뮬레이션 시작 ===\n")
-            f0 = 7.25e9
-            fc = 3.5e9
 
             FDTD = openEMS(NrTS=100000, EndCriteria=1e-3)
             CSX = ContinuousStructure()
             FDTD.SetCSX(CSX)
 
-            mesh = CSX.GetGrid()
-            mesh.SetDeltaUnit(1e-3)
-
-            # 1. 고정되어야 하는 핵심 좌표들(Key lines)만 먼저 입력
-            mesh_xy = np.arange(-25.0, 26.0, 1.0)
-            mesh.AddLine('x', mesh_xy)
-            mesh.AddLine('y', mesh_xy)
-
-            # NF2FF 박스와 PML 영역을 위한 기준선 (X, Y)
-            mesh.AddLine('x', [-50.0, -35.0, 35.0, 50.0])
-            mesh.AddLine('y', [-50.0, -35.0, 35.0, 50.0])
-
-            # Z축 기준선 (FR4 내부를 0.5mm 간격으로 분할)
-            metal_thickness = 0.035
-            mesh.AddLine('z', np.arange(0, 1.51, 0.5))
-            mesh.AddLine('z', [-metal_thickness, 1.5 + metal_thickness])
-
-            # NF2FF 박스와 PML 영역을 위한 기준선 (Z)
-            mesh.AddLine('z', [-40.0, -5.0, 15.0, 40.0])
-
-            # 2. 💡 [핵심] SmoothMeshLines를 통한 부드러운 메쉬 생성
-            # 최대 메쉬 크기(max_res)를 지정하면, 촘촘한 곳에서부터 1.3배씩 서서히 커지도록 빈 공간을 채워줍니다.
-            max_res = 10.0  # 공기 중 최대 메쉬 크기를 10mm로 제한 (파장 대비 충분히 작은 값)
-            mesh.SmoothMeshLines('x', max_res, ratio=1.3)
-            mesh.SmoothMeshLines('y', max_res, ratio=1.3)
-            mesh.SmoothMeshLines('z', max_res, ratio=1.3)
-
-            FR4 = CSX.AddMaterial('FR4', epsilon=4.4)
-            FR4.AddBox([-25.0, -25.0, 0], [25.0, 25.0, 1.5],priority = 0)
-
-            metal = CSX.AddMetal('Copper')
-            metal.AddBox([-25.0, -25.0, -metal_thickness], [25.0, 25.0, 0], priority=10)
-            patch_count = 1
-
-            for i in range(51):
-                for j in range(51):
-                    if genome[i, j] == 1:
-                        x1 = round(-25.0 + i, 3)
-                        x2 = round(x1 + 1.0, 3)
-                        y1 = round(-25.0 + j, 3)
-                        y2 = round(y1 + 1.0, 3)
-                        metal.AddBox([x1, y1, 1.5], [x2, y2, 1.5 + metal_thickness], priority=10)
-                        patch_count += 1
-
-
+            # 💡 공통 모델 생성 함수 호출 (Et 덤프 포함)
+            _, _, patch_count = build_antenna_model(genome, FDTD, CSX, include_nf2ff=False, include_et_dump=True)
             log_file.write(f"메탈 픽셀 개수: {patch_count}개\n")
-
-            FDTD.AddEdges2Grid(dirs='xy', properties=metal)
-            port = FDTD.AddLumpedPort(1, 50, [-0.5, -10.5, 0.0], [0.5, -9.5, 1.5], 'z', 1.0, priority=5, edges2grid='xy')
-            e_dump = CSX.AddDump('Et', dump_type=0, file_type=0, sub_sampling=[2, 2, 2])
-            e_dump.AddBox([-50.0, -50.0, -5.0], [50.0, 50.0, 20.0])
-
-            FDTD.SetBoundaryCond(['PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8'])
-            FDTD.SetGaussExcite(f0, fc)
 
             log_file.write("FDTD.Run 실행 시작...\n")
             log_file.flush()
@@ -211,6 +158,76 @@ def simulate_and_dump_paraview(genome, output_dir="paraview_debug_output"):
             # 💡 [방어 코드 2] openEMS가 경로를 바꿨더라도 무조건 원래 위치로 강제 복귀!
             os.chdir(original_cwd)
 
+
+def build_antenna_model(genome, FDTD, CSX, include_nf2ff=False, include_et_dump=False):
+    """
+    안테나 모델(메쉬, 기판, 픽셀 패치, 포트, 경계조건)을 공통으로 생성하는 함수
+    """
+    f0 = 7.25e9
+    fc = 3.5e9
+
+    mesh = CSX.GetGrid()
+    mesh.SetDeltaUnit(1e-3)
+
+    # 1. 고정 핵심 좌표 (X, Y)
+    mesh_xy = np.arange(-25.0, 26.0, 1.0)
+    mesh.AddLine('x', mesh_xy)
+    mesh.AddLine('y', mesh_xy)
+
+    # NF2FF 박스와 PML 영역을 위한 기준선 (X, Y)
+    mesh.AddLine('x', [-50.0, -35.0, 35.0, 50.0])
+    mesh.AddLine('y', [-50.0, -35.0, 35.0, 50.0])
+
+    # Z축 기준선 (FR4 내부 분할)
+    metal_thickness = 0.035
+    mesh.AddLine('z', np.arange(0, 1.51, 0.5))
+    mesh.AddLine('z', [-metal_thickness, 1.5 + metal_thickness])
+    mesh.AddLine('z', [-40.0, -5.0, 15.0, 40.0])
+
+    # 2. 부드러운 메쉬 생성
+    max_res = 10.0
+    mesh.SmoothMeshLines('x', max_res, ratio=1.3)
+    mesh.SmoothMeshLines('y', max_res, ratio=1.3)
+    mesh.SmoothMeshLines('z', max_res, ratio=1.3)
+
+    # 3. 물질 및 금속(그라운드) 정의
+    FR4 = CSX.AddMaterial('FR4', epsilon=4.4)
+    FR4.AddBox([-25.0, -25.0, 0], [25.0, 25.0, 1.5], priority=0)
+
+    metal = CSX.AddMetal('Copper')
+    metal.AddBox([-25.0, -25.0, -metal_thickness], [25.0, 25.0, 0], priority=10)
+
+    # 4. 유전체 위 픽셀 패치 생성
+    patch_count = 1
+    for i in range(51):
+        for j in range(51):
+            if genome[i, j] == 1:
+                x1 = round(-25.0 + i, 3)
+                x2 = round(x1 + 1.0, 3)
+                y1 = round(-25.0 + j, 3)
+                y2 = round(y1 + 1.0, 3)
+                metal.AddBox([x1, y1, 1.5], [x2, y2, 1.5 + metal_thickness], priority=10)
+                patch_count += 1
+
+    FDTD.AddEdges2Grid(dirs='xy', properties=metal)
+
+    # 5. 포트 설정 (원하신다면 나중에 이 좌표를 중앙 [0,0]으로 변경 가능)
+    port = FDTD.AddLumpedPort(1, 50, [-0.5, -0.5, 0.0], [0.5, 0.5, 1.5], 'z', 1.0, priority=5, edges2grid='xy')
+
+    # 6. 옵션 기능 (NF2FF 박스 혹은 ParaView용 Et 덤프)
+    calc_nf2ff = None
+    if include_nf2ff:
+        calc_nf2ff = FDTD.CreateNF2FFBox(start=[-35.0, -35.0, -5.0], stop=[35.0, 35.0, 15.0])
+
+    if include_et_dump:
+        e_dump = CSX.AddDump('Et', dump_type=0, file_type=0, sub_sampling=[2, 2, 2])
+        e_dump.AddBox([-50.0, -50.0, -5.0], [50.0, 50.0, 20.0])
+
+    # 7. 경계조건 및 가진 함수 설정
+    FDTD.SetBoundaryCond(['PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8'])
+    FDTD.SetGaussExcite(f0, fc)
+
+    return port, calc_nf2ff, patch_count
 # ==========================================
 # 1. 단일 개체 시뮬레이션 함수 (독립 프로세스 구동)
 # ==========================================
@@ -239,63 +256,10 @@ def simulate_individual(args):
             pass
 
     try:
-        f0 = 7.25e9
-        fc = 3.5e9
-
-        # 타임스텝 한계를 15000으로 조여서 불량 개체 빠른 차단
         FDTD = openEMS(NrTS=100000, EndCriteria=1e-3)
         CSX = ContinuousStructure()
         FDTD.SetCSX(CSX)
-
-        mesh = CSX.GetGrid()
-        mesh.SetDeltaUnit(1e-3)
-
-        # 1. 고정되어야 하는 핵심 좌표들(Key lines)만 먼저 입력
-        mesh_xy = np.arange(-25.0, 26.0, 1.0)
-        mesh.AddLine('x', mesh_xy)
-        mesh.AddLine('y', mesh_xy)
-
-        # NF2FF 박스와 PML 영역을 위한 기준선 (X, Y)
-        mesh.AddLine('x', [-50.0, -35.0, 35.0, 50.0])
-        mesh.AddLine('y', [-50.0, -35.0, 35.0, 50.0])
-
-        # Z축 기준선 (FR4 내부를 0.5mm 간격으로 분할)
-        metal_thickness = 0.035
-        mesh.AddLine('z', np.arange(0, 1.51, 0.5))
-        mesh.AddLine('z', [-metal_thickness, 1.5 + metal_thickness])
-
-        # NF2FF 박스와 PML 영역을 위한 기준선 (Z)
-        mesh.AddLine('z', [-40.0, -5.0, 15.0, 40.0])
-
-        # 2. 💡 [핵심] SmoothMeshLines를 통한 부드러운 메쉬 생성
-        # 최대 메쉬 크기(max_res)를 지정하면, 촘촘한 곳에서부터 1.3배씩 서서히 커지도록 빈 공간을 채워줍니다.
-        max_res = 10.0  # 공기 중 최대 메쉬 크기를 10mm로 제한 (파장 대비 충분히 작은 값)
-        mesh.SmoothMeshLines('x', max_res, ratio=1.3)
-        mesh.SmoothMeshLines('y', max_res, ratio=1.3)
-        mesh.SmoothMeshLines('z', max_res, ratio=1.3)
-
-        FR4 = CSX.AddMaterial('FR4', epsilon=4.4)
-        FR4.AddBox([-25.0, -25.0, 0], [25.0, 25.0, 1.5], priority=0)
-
-        metal = CSX.AddMetal('Copper')
-        metal.AddBox([-25.0, -25.0, -metal_thickness], [25.0, 25.0, 0], priority=10)
-
-        for i in range(51):
-            for j in range(51):
-                if genome[i, j] == 1:
-                    x1 = round(-25.0 + i, 3)
-                    x2 = round(x1 + 1.0, 3)
-                    y1 = round(-25.0 + j, 3)
-                    y2 = round(y1 + 1.0, 3)
-                    metal.AddBox([x1, y1, 1.5], [x2, y2, 1.5 + metal_thickness], priority=10)
-
-        FDTD.AddEdges2Grid(dirs='xy', properties=metal)
-        port = FDTD.AddLumpedPort(1, 50, [-0.5, -10.5, 0.0], [0.5, -9.5, 1.5], 'z', 1.0, priority=5, edges2grid='xy')
-
-        FDTD.SetBoundaryCond(['PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8', 'PML_8'])
-        FDTD.SetGaussExcite(f0, fc)
-
-        calc_nf2ff = FDTD.CreateNF2FFBox(start=[-35.0, -35.0, -5.0], stop=[35.0, 35.0, 15.0])
+        port, calc_nf2ff, _ = build_antenna_model(genome, FDTD, CSX, include_nf2ff=True, include_et_dump=False)
 
         with suppress_stdout_stderr():
             FDTD.Run(local_temp_base, cleanup=False, verbose=0)
@@ -316,7 +280,7 @@ def simulate_individual(args):
 
         if max_S11_in_band > -1.0:
             # -1.0dB 이상: 에너지가 아예 나가지 않는 구조 (-0.06dB 같은 녀석들) -> 즉시 도태
-            score = -999.0
+            score = -150.0 - (max_S11_in_band * 10.0)
         elif max_S11_in_band > -10.0:
             # 에너지가 나가긴 하지만 매칭이 덜 된 상태 -> 기본 페널티 + 잔물결 페널티 복합 부여
             base_penalty = (max_S11_in_band - (-10.0)) * 15.0
@@ -343,7 +307,7 @@ def save_generation_image(genome, S11, freqs, gen, score, peak_dir, max_s11):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
     # 왼쪽: 안테나 형상 (픽셀)
-    ax1.imshow(genome.T, cmap='Greys', interpolation='nearest', origin='lower', extent=[-50, 50, -50, 50])
+    ax1.imshow(genome.T, cmap='Greys', interpolation='nearest', origin='lower', extent=[-25, 25, -25, 25])
     # 포트 위치 표시를 (0,0)으로 지정
     ax1.set_title(f"Gen {gen} Best Topology\n(Black = Copper, White = Air)", fontsize=14)
     # 그리드 추가
@@ -351,7 +315,7 @@ def save_generation_image(genome, S11, freqs, gen, score, peak_dir, max_s11):
     ax1.set_yticks(np.arange(-50.5, 51.5, 1), minor=True)
     ax1.grid(True, which='minor', color='black', linestyle='-', linewidth=0.5)
     # 급전점 표시 (빨간 X)
-    ax1.plot(0, -10, 'rx', markersize=12, markeredgewidth=3, label='Feed Point (0,-10)')
+    ax1.plot(0, 0, 'rx', markersize=4, markeredgewidth=3, label='Feed Point (0,0)')
     ax1.legend(loc='upper right')
 
     # 오른쪽: S11 그래프
@@ -377,64 +341,111 @@ def save_generation_image(genome, S11, freqs, gen, score, peak_dir, max_s11):
 # ==========================================
 
 #군론 응용
-def D4_group_theory(size=51):
+def D4_group_theory(size=51, symmetry_mode=None):
     """
-    군론(Group Theory)의 이면군(Dihedral Group, D4) 및 부분군 대칭성을
-    적용하여 안테나 패치(Genome)를 생성하는 함수입니다.
-    - size: 정중앙 대칭을 위해 홀수 크기 권장 (기본값: 51)
+    정사각형 $D_4$ 이면군 및 그 부분군(Subgroups)을 적용한 안테나 패치 생성기
+    - symmetry_mode: None 지정 시 7가지 모드 중 무작위 선택
     """
-    assert size % 2 == 1, "정중앙 대칭과 포트 일치를 위해 size는 홀수여야 합니다."
-
+    assert size % 2 == 1, "size는 홀수여야 합니다."
     center = size // 2
     half = center + 1
-
-    # 1/4 크기의 기본 코어 조각 무작위 생성
-    core = np.random.randint(0, 2, size=(half, half))
-
-    # 정중앙(급전점 위치)은 항상 구리(1)로 고정
-    core[0, 0] = 1
-
     ind = np.zeros((size, size), dtype=int)
 
-    # D4 군(Dihedral Group)에 속하는 대칭 모드 중 하나를 무작위 선택
-    # 0: 완벽한 D4 대칭 (모든 반사축 + 90도 회전 성분)
-    # 1: 직교 반사 대칭 (상하 / 좌우 대칭)
-    # 2: 대각선 반사 대칭
-    symmetry_mode = np.random.choice([0, 1, 2])
+    if symmetry_mode is None:
+        symmetry_mode = np.random.choice([1, 2, 3, 4, 5, 6]) # 전체 대칭 제외
 
-    for i in range(half):
-        for j in range(half):
-            val = core[i, j]
-
-            if symmetry_mode == 0:
-                # D4 전체 대칭 (4방향 반사 및 대각선 대칭 반영)
+    # ----------------------------------------------------
+    # Mode 0: 전체 D4 대칭 (4방향 반사 + 대각선 + 90도 회전)
+    # ----------------------------------------------------
+    if symmetry_mode == 0:
+        core = np.random.randint(0, 2, size=(half, half))
+        for i in range(half):
+            for j in range(half):
+                val = core[i, j]
                 ind[center + i, center + j] = val
                 ind[center - i, center + j] = val
                 ind[center + i, center - j] = val
                 ind[center - i, center - j] = val
-
                 ind[center + j, center + i] = val
                 ind[center - j, center + i] = val
                 ind[center + j, center - i] = val
                 ind[center - j, center - i] = val
 
-            elif symmetry_mode == 1:
-                # 상하 / 좌우 반사 대칭 (Klein 4-group 성질)
+    # ----------------------------------------------------
+    # Mode 1: Klein 4-group (상하 + 좌우 직교 반사 대칭)
+    # ----------------------------------------------------
+    elif symmetry_mode == 1:
+        core = np.random.randint(0, 2, size=(half, half))
+        for i in range(half):
+            for j in range(half):
+                val = core[i, j]
                 ind[center + i, center + j] = val
                 ind[center - i, center + j] = val
                 ind[center + i, center - j] = val
                 ind[center - i, center - j] = val
 
-            else:
-                # 대각선 반사 대칭
+    # ----------------------------------------------------
+    # Mode 2: 대각선 반사 대칭
+    # ----------------------------------------------------
+    elif symmetry_mode == 2:
+        core = np.random.randint(0, 2, size=(half, half))
+        for i in range(half):
+            for j in range(half):
+                val = core[i, j]
                 ind[center + i, center + j] = val
                 ind[center - i, center - j] = val
                 ind[center + j, center + i] = val
                 ind[center - j, center - i] = val
 
-    # 정중앙(급전점 픽셀)은 예외 없이 확실하게 1로 보장
-    ind[center-1:center+1, center-1:center+1] = 1
-    ind[center - 1:center + 1, 14:center] = 1
+    # ----------------------------------------------------
+    # Mode 3: 상하만 대칭 (Horizontal Axis Reflection)
+    # ----------------------------------------------------
+    elif symmetry_mode == 3:
+        core = np.random.randint(0, 2, size=(half, size))
+        for i in range(half):
+            for j in range(size):
+                val = core[i, j]
+                ind[center - i, j] = val
+                ind[center + i, j] = val
+
+    # ----------------------------------------------------
+    # Mode 4: 좌우만 대칭 (Vertical Axis Reflection)
+    # ----------------------------------------------------
+    elif symmetry_mode == 4:
+        core = np.random.randint(0, 2, size=(size, half))
+        for i in range(size):
+            for j in range(half):
+                val = core[i, j]
+                ind[i, center - j] = val
+                ind[i, center + j] = val
+
+    # ----------------------------------------------------
+    # Mode 5: 180도 회전 대칭 (C2 점대칭)
+    # ----------------------------------------------------
+    elif symmetry_mode == 5:
+        core = np.random.randint(0, 2, size=(half, size))
+        for i in range(half):
+            for j in range(size):
+                val = core[i, j]
+                ind[center - i, j] = val
+                ind[center + i, size - 1 - j] = val
+
+    # ----------------------------------------------------
+    # Mode 6: 90도 회전 대칭 (C4 순환대칭, 반사 없음)
+    # ----------------------------------------------------
+    elif symmetry_mode == 6:
+        core = np.random.randint(0, 2, size=(half, half))
+        for i in range(half):
+            for j in range(half):
+                val = core[i, j]
+                ind[center + i, center + j] = val
+                ind[center - j, center + i] = val
+                ind[center - i, center - j] = val
+                ind[center + j, center - i] = val
+
+    # 💡 [핵심] 정중앙 급전점 및 급전선(Port ~ Center) 보장
+    ind[center - 1:center + 1, center - 1:center + 1] = 1
+    #ind[center - 1:center + 1, 14:center] = 1
 
     return ind
 
@@ -444,6 +455,29 @@ def create_individual():
     return D4_group_theory(size=51)
 
 
+def repair_chromosome(ind):
+    size = 51
+    center = size // 2
+    half = center + 1
+
+    core = ind[:half, :half].copy()
+
+    for i in range(half):
+        for j in range(half):
+            val = core[i, j]
+            ind[center + i, center + j] = val
+            ind[center - i, center + j] = val
+            ind[center + i, center - j] = val
+            ind[center - i, center - j] = val
+            ind[center + j, center + i] = val
+            ind[center - j, center + i] = val
+            ind[center + j, center - i] = val
+            ind[center - j, center - i] = val
+
+    ind[center - 1:center + 1, center - 1:center + 1] = 1
+    ind[center - 1:center + 1, 14:center] = 1
+
+    return ind
 """
 def create_individual():
     # 101x101 크기로 변경하고, 정중앙 인덱스 [50, 50]을 구리로 고정
@@ -467,7 +501,7 @@ def create_individual():
 """
 
 def run_ga():
-    POP_SIZE = 10
+    POP_SIZE = 30
     GENERATIONS = 30
     MUTATION_RATE = 0.05
 
@@ -477,7 +511,7 @@ def run_ga():
     population = [create_individual() for _ in range(POP_SIZE)]
 
     # 사용할 CPU 코어 수 설정
-    num_workers = min(POP_SIZE, mp.cpu_count())
+    num_workers = min(POP_SIZE, mp.cpu_count()-1)
     print(f"⚡ 멀티스레딩 풀(Pool) 가동: {num_workers}개 코어 동시 병렬 연산")
 
     best_history = []
@@ -501,7 +535,6 @@ def run_ga():
 
                 # 방어선: 함정/고장 개체 차단 (세대와 인덱스로 고유 폴더명 지정)
                 if score == -999 or s11 > -1.0 or p_dir > 20.0:
-                    score = -999
                     # 💡 BASE_DIR을 합쳐서 무조건 최상위 폴더 아래에 만들어지도록 강제
                     folder_name = os.path.join(BASE_DIR, f"faulty_gen{gen:02d}_ind{i + 1:02d}")
                     print(f"  🚨 함정 개체 차단! (개체 {i + 1} | S11: {s11:.2f}dB, Dir: {p_dir:.2f}dBi) -> 덤프: {folder_name}")
@@ -535,7 +568,13 @@ def run_ga():
 
             # 다음 세대 생성 로직 (토너먼트 선택, 교차, 돌연변이)
             new_population = []
-            for _ in range(POP_SIZE):
+
+            # 1. 엘리트 보존 (Elitism)
+            best_idx = np.argmax(fitness_scores)
+            new_population.append(population[best_idx].copy())
+
+            # 2. 나머지 개체 생성
+            for _ in range(POP_SIZE - 1):
                 idx1, idx2, idx3 = np.random.choice(POP_SIZE, 3, replace=False)
                 parent1_idx = max([(fitness_scores[i], i) for i in [idx1, idx2, idx3]])[1]
 
@@ -551,7 +590,8 @@ def run_ga():
                 mutation_mask = np.random.rand(51, 51) < MUTATION_RATE
                 child = np.where(mutation_mask, 1 - child, child)
 
-                child[25, 25] = 1
+                # 💡 추가한 치료 함수로 대칭성/급전선 강제 복구
+                child = repair_chromosome(child)
 
                 new_population.append(child)
 
@@ -559,7 +599,7 @@ def run_ga():
 
     print("\n🎉 모든 진화 과정이 완료되었습니다!")
 
-#tstty
+
 if __name__ == '__main__':
     # Windows에서 multiprocessing을 사용할 때 필수 방어 코드
     mp.freeze_support()
