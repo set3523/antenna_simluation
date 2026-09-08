@@ -6,6 +6,7 @@ import multiprocessing as mp
 import tempfile
 import time
 import traceback
+from scipy.ndimage import median_filter
 
 # ==========================================
 # 0. 경로 설정 (사용자 환경에 맞게 유지)
@@ -202,9 +203,9 @@ def build_antenna_model(genome, FDTD, CSX, include_nf2ff=False, include_et_dump=
     for i in range(51):
         for j in range(51):
             if genome[i, j] == 1:
-                x1 = round(-25.0 + i, 3)
+                x1 = round(-25.5 + i, 3)
                 x2 = round(x1 + 1.0, 3)
-                y1 = round(-25.0 + j, 3)
+                y1 = round(-25.5 + j, 3)
                 y2 = round(y1 + 1.0, 3)
                 metal.AddBox([x1, y1, 1.5], [x2, y2, 1.5 + metal_thickness], priority=10)
                 patch_count += 1
@@ -444,8 +445,9 @@ def D4_group_theory(size=51, symmetry_mode=None):
                 ind[center + j, center - i] = val
 
     # 💡 [핵심] 정중앙 급전점 및 급전선(Port ~ Center) 보장
-    ind[center - 1:center + 1, center - 1:center + 1] = 1
+    #ind[center - 1:center + 1, center - 1:center + 1] = 1
     #ind[center - 1:center + 1, 14:center] = 1
+    ind[center,center] = 1
 
     return ind
 
@@ -456,26 +458,31 @@ def create_individual():
 
 
 def repair_chromosome(ind):
+    # 1. 미디언 필터(Median Filter)로 노이즈 제거
+    # 3x3 창을 씌워 가루처럼 흩어진 1x1 픽셀들을 뭉텅이(Patch)로 뭉쳐줍니다.
+    # 바둑판 착시와 FDTD 연산 오류를 한 번에 해결하는 핵심 기술입니다.
+    ind = median_filter(ind, size=3)
+
+    # 2. 대칭성 복구 (전체 대칭 강제 덮어씌우기 삭제)
+    # 기존 코드처럼 무조건 8방향 대칭을 강제하지 않고,
+    # 필터링 후 뭉개졌을 수 있는 상하/좌우 십자가(Quadrant) 대칭 정도만 부드럽게 맞춰줍니다.
     size = 51
     center = size // 2
     half = center + 1
 
-    core = ind[:half, :half].copy()
-
+    # 1사분면(우상단)을 기준으로 상하좌우 대칭을 최소한으로 복구 (Mode 1 유사 적용)
+    core = ind[:half, center:].copy()
     for i in range(half):
         for j in range(half):
             val = core[i, j]
-            ind[center + i, center + j] = val
+            # 상하좌우 반사
             ind[center - i, center + j] = val
-            ind[center + i, center - j] = val
+            ind[center + i, center + j] = val
             ind[center - i, center - j] = val
-            ind[center + j, center + i] = val
-            ind[center - j, center + i] = val
-            ind[center + j, center - i] = val
-            ind[center - j, center - i] = val
+            ind[center + i, center - j] = val
 
-    ind[center - 1:center + 1, center - 1:center + 1] = 1
-    ind[center - 1:center + 1, 14:center] = 1
+    # 3. 정중앙 급전점(Port) 1x1 구리 고정 보장
+    ind[center, center] = 1
 
     return ind
 """
